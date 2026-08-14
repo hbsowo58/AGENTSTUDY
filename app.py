@@ -12,7 +12,10 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # Streamlit Cloud에서는 st.secrets에서 읽음
-api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+try:
+    api_key = st.secrets["OPENAI_API_KEY"]
+except KeyError:
+    api_key = os.getenv("OPENAI_API_KEY")
 
 llm = ChatOpenAI(model_name="gpt-4o", api_key=api_key)
 

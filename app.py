@@ -1,6 +1,7 @@
 import streamlit as st
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
+import os
 
 load_dotenv()
 
@@ -10,7 +11,10 @@ st.title("💬 AI 챗봇")
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-llm = ChatOpenAI(model_name="gpt-4o")
+# Streamlit Cloud에서는 st.secrets에서 읽음
+api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+
+llm = ChatOpenAI(model_name="gpt-4o", api_key=api_key)
 
 # 대화 히스토리 표시
 for message in st.session_state.messages:

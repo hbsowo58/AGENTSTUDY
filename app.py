@@ -1,10 +1,10 @@
 import os
 import streamlit as st
-from typing import TypedDict, Annotated
-from operator import add
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, START, END
+from langchain.agents import AgentState, create_agent
+from langchain.agents.middleware import before_model
+from langchain_tavily import TavilySearch
 
 load_dotenv()
 
@@ -12,14 +12,7 @@ st.set_page_config(page_title="LangGraph AI 챗봇", layout="wide")
 st.title("💬 LangGraph 기반 AI 챗봇")
 
 # -------------------------
-# 1) 상태 정의 (5.2)
-# -------------------------
-class State(TypedDict):
-    messages: Annotated[list[str], add]
-    question_length: int
-
-# -------------------------
-# 2) OpenAI 설정
+# 1) 모델과 검색 도구 설정
 # -------------------------
 try:
     api_key = st.secrets["OPENAI_API_KEY"]
@@ -32,66 +25,45 @@ if not api_key:
 
 llm = ChatOpenAI(model="gpt-4o", api_key=api_key)
 
+try:
+    tavily_api_key = st.secrets["TAVILY_API_KEY"]
+except Exception:
+    tavily_api_key = os.getenv("TAVILY_API_KEY")
+
+tools = []
+if tavily_api_key:
+    tools.append(TavilySearch(max_results=3, tavily_api_key=tavily_api_key))
+
+BLOCKED_WORDS = ["바보", "멍청이", "나쁜말"]
+
 # -------------------------
-# 3) 그래프 노드 함수 (5.3)
+# 2) 입력 필터 미들웨어
 # -------------------------
-def guardrail(state: State) -> State:
-    # 마지막 사용자 메시지를 기준으로 질문 길이를 판별
-    last_message = state["messages"][-1]
-    return {
-        "question_length": len(last_message.strip())
-    }
+@before_model
+def content_filter(state: AgentState, runtime):
+    last_message = state["messages"][-1] if state["messages"] else None
+    content = getattr(last_message, "content", str(last_message))
 
+    if not content.strip():
+        raise ValueError("질문을 입력해주세요.")
 
-def chatbot(state: State) -> State:
-    history = state["messages"]
-
-    # 대화 기록 전체를 LLM에 전달해서 기억 유지
-    langchain_messages = [("system", "당신은 친절하고 정확한 AI 어시스턴트입니다.")]
-
-    for i, msg in enumerate(history):
-        role = "human" if i % 2 == 0 else "ai"
-        langchain_messages.append((role, msg))
-
-    response = llm.invoke(langchain_messages)
-    answer = response.content
-
-    return {
-        "messages": [answer]
-    }
-
-
-def route(state: State) -> str:
-    # 질문 길이가 짧거나 비어 있으면 종료
-    if state["question_length"] <= 1:
-        return END
-    return "chatbot"
+    for word in BLOCKED_WORDS:
+        if word in content:
+            raise ValueError("부적절한 표현이 포함되어 있어 요청을 처리할 수 없습니다.")
 
 
 # -------------------------
-# 4) 그래프 구성
+# 3) 에이전트 구성
 # -------------------------
 if "graph" not in st.session_state:
-    builder = StateGraph(State)
-
-    builder.add_node("guardrail", guardrail)
-    builder.add_node("chatbot", chatbot)
-
-    builder.add_edge(START, "guardrail")
-    builder.add_conditional_edges(
-        "guardrail",
-        route,
-        {
-            "chatbot": "chatbot",
-            END: END,
-        },
+    st.session_state.graph = create_agent(
+        model=llm,
+        tools=tools,
+        middleware=[content_filter],
     )
-    builder.add_edge("chatbot", END)
-
-    st.session_state.graph = builder.compile()
 
 # -------------------------
-# 5) 세션 상태 초기화
+# 4) 세션 상태와 대화 화면
 # -------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -103,24 +75,29 @@ for msg in st.session_state.messages:
 
 # 사용자 입력
 if prompt := st.chat_input("질문을 입력하세요..."):
-    # 사용자 메시지 저장
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 그래프에 넘길 전체 대화 기록 만들기
-    history_texts = [msg["content"] for msg in st.session_state.messages]
-    current_state = {
-        "messages": history_texts,
-        "question_length": len(prompt.strip()),
-    }
+    try:
+        result = st.session_state.graph.invoke(
+            {"messages": st.session_state.messages}
+        )
+        answer = result["messages"][-1].content
+        used_search = any(
+            getattr(message, "type", "") == "tool"
+            and getattr(message, "name", "") == "tavily_search"
+            for message in result["messages"]
+        )
 
-    result = st.session_state.graph.invoke(current_state)
-
-    # 마지막 답변 추출
-    answer = result["messages"][-1]
-
-    # 답변 저장 및 표시
-    st.session_state.messages.append({"role": "assistant", "content": answer})
-    with st.chat_message("assistant"):
-        st.markdown(answer)
+        st.session_state.messages.append(
+            {"role": "assistant", "content": answer}
+        )
+        with st.chat_message("assistant"):
+            if used_search:
+                st.caption("웹 검색을 사용해 답변했습니다.")
+            st.markdown(answer)
+    except ValueError as error:
+        st.warning(str(error))
+    except Exception as error:
+        st.error(f"에이전트 실행 중 오류가 발생했습니다: {error}")
